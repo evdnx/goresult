@@ -32,7 +32,7 @@ import (
 	"log"
 	"math/rand"
 	"os"
-	"github.com/evdnx/go-result/result"
+	"github.com/evdnx/go-result"
 	"time"
 )
 
