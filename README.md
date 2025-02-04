@@ -19,6 +19,9 @@ go get -u github.com/evdnx/go-result
 - **Optional Conversion**: Seamlessly convert between `Result` and optional values.
 - **Debugging and Logging**: Structured error logging with stack traces.
 - **Concurrency**: Support for parallel execution with worker pools.
+- **Mapping and Chaining:**
+	- Map: (Free function) Transforms a successful Result by applying a function to its value.
+	- AndThen: (Free function) Chains a computation that returns a new Result, useful for composing operations.
 
 # Example Usage
 
@@ -28,84 +31,159 @@ Here’s a complete Go program demonstrating the key features of the `result` pa
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
-	"os"
-	"github.com/evdnx/go-result"
 	"time"
+
+	"github.com/evdnx/go-result"
 )
 
-func unreliableTask() result.Result[string] {
-	if rand.Float64() < 0.5 {
-		return result.Err[string](fmt.Errorf("random failure"))
-	}
-	return result.Ok("success")
-}
-
-func fallback() result.Result[int] {
-	return result.Ok(100)
-}
-
-func task1() result.Result[int] { return result.Ok(10) }
-func task2() result.Result[int] { return result.Err[int](fmt.Errorf("task 2 failed")) }
-func task3() result.Result[int] { return result.Ok(30) }
-
 func main() {
+	// Seed the random number generator (used by addJitter)
 	rand.Seed(time.Now().UnixNano())
 
-	okResult := result.Ok(42)
-	fmt.Println(okResult.DebugString()) // Output: Ok(42)
+	// === Example 1: Basic Usage (Ok, Err, Unwrap, UnwrapErr, UnwrapOr) ===
 
-	errResult := result.Err[int](fmt.Errorf("something went wrong"))
-	fmt.Println(errResult.DebugString()) // Output: Err(something went wrong)
+	fmt.Println("=== Example 1: Basic Usage ===")
+	// Creating an Ok result.
+	r1 := result.Ok(42)
+	fmt.Println("r1 is Ok:", r1.IsOk())
+	fmt.Println("r1 value:", r1.Unwrap())
 
-	res := result.Err[int](fmt.Errorf("initial failure"))
-	finalResult := res.OrElse(fallback)
-	fmt.Println(finalResult.DebugString()) // Output: Ok(100)
+	// Creating an Err result.
+	r2 := result.Err[int](errors.New("something went wrong"))
+	fmt.Println("r2 is Err:", r2.IsErr())
+	// Trying to unwrap r2 as a value would panic.
+	// Instead, we unwrap the error:
+	fmt.Println("r2 error:", r2.UnwrapErr())
 
-	filtered := result.Ok(42).Filter(func(v int) bool { return v > 50 }, fmt.Errorf("value too small"))
-	fmt.Println(filtered.DebugString()) // Output: Err(value too small)
+	// Using UnwrapOr to provide a default value.
+	r3 := result.Err[int](errors.New("failure"))
+	fmt.Println("r3 value with default:", r3.UnwrapOr(100))
 
+	// === Example 2: Using Map and AndThen (Free Functions) ===
+
+	fmt.Println("\n=== Example 2: Map and AndThen ===")
+	// Define a function to double a number.
+	double := func(x int) int { return x * 2 }
+
+	// Map r1 (an Ok result) to double its value.
+	mapped := result.Map(r1, double)
+	fmt.Println("Mapped r1 (doubled):", mapped.Unwrap())
+
+	// AndThen (chain) a computation that returns a new Result.
+	toString := func(x int) result.Result[string] {
+		if x < 50 {
+			return result.Ok(fmt.Sprintf("Number %d is small", x))
+		}
+		return result.Ok(fmt.Sprintf("Number %d is large", x))
+	}
+	chained := result.AndThen(mapped, toString)
+	fmt.Println("Chained result:", chained.Unwrap())
+
+	// === Example 3: Filtering ===
+
+	fmt.Println("\n=== Example 3: Filter ===")
+	// Filter to only allow even numbers.
+	isEven := func(x int) bool { return x%2 == 0 }
+	filtered := r1.Filter(isEven, errors.New("number is not even"))
+	if filtered.IsOk() {
+		fmt.Println("Filtered r1 passes:", filtered.Unwrap())
+	} else {
+		fmt.Println("Filtered r1 rejected:", filtered.UnwrapErr())
+	}
+
+	// === Example 4: RetryWithBackoff ===
+
+	fmt.Println("\n=== Example 4: RetryWithBackoff ===")
+	// A function that fails a couple of times before succeeding.
+	attempt := 0
+	retryFn := func() result.Result[string] {
+		attempt++
+		if attempt < 3 {
+			return result.Err[string](errors.New("temporary failure"))
+		}
+		return result.Ok(fmt.Sprintf("success on attempt %d", attempt))
+	}
+	// Configure backoff parameters.
 	cfg := result.BackoffConfig{
 		InitialDelay: 100 * time.Millisecond,
-		MaxDelay:     2 * time.Second,
-		Factor:       2.0,
-		Jitter:       0.2,
+		MaxDelay:     1 * time.Second,
+		Factor:       2,
+		Jitter:       0.1,
 	}
-	retryResult := result.RetryWithBackoff(5, unreliableTask, cfg)
-	fmt.Println(retryResult.DebugString()) // Output: Ok(success) or Err(random failure)
-
-	results := []result.Result[int]{
-		result.Ok(10),
-		result.Err[int](fmt.Errorf("error 1")),
-		result.Ok(20),
-		result.Err[int](fmt.Errorf("error 2")),
+	retryResult := result.RetryWithBackoff(5, retryFn, cfg)
+	if retryResult.IsOk() {
+		fmt.Println("Retry succeeded:", retryResult.Unwrap())
+	} else {
+		fmt.Println("Retry failed:", retryResult.UnwrapErr())
 	}
-	oks, errs := result.Batch(results)
-	fmt.Println("Successes:", oks) // Output: Successes: [10 20]
-	fmt.Println("Errors:", errs)   // Output: Errors: [error 1 error 2]
 
-	aggregate := result.AggregateErrors(errs)
-	fmt.Println(aggregate) // Output: aggregate error: error 1; error 2;
+	// === Example 5: Batch and AggregateErrors ===
 
-	opt := result.Ok(42).ToOption()
-	fmt.Println(opt) // Output: {42 true}
-
-	backToResult := result.FromOption(opt, fmt.Errorf("no value"))
-	fmt.Println(backToResult.DebugString()) // Output: Ok(42)
-
-	parallelResults := result.ParallelWithWorkers([]func() result.Result[int]{task1, task2, task3}, 2)
-	for _, res := range parallelResults {
-		fmt.Println(res.DebugString())
+	fmt.Println("\n=== Example 5: Batch and AggregateErrors ===")
+	tasks := []result.Result[int]{
+		result.Ok(1),
+		result.Err[int](errors.New("error in task 2")),
+		result.Ok(3),
+		result.Err[int](errors.New("error in task 4")),
 	}
-	// Output:
-	// Ok(10)
-	// Err(task 2 failed)
-	// Ok(30)
+	oks, errs := result.Batch(tasks)
+	fmt.Println("Batch Ok values:", oks)
+	fmt.Println("Batch Errors:", errs)
+	aggErr := result.AggregateErrors(errs)
+	fmt.Println("Aggregated Error:", aggErr)
 
-	logger := log.New(os.Stdout, "RESULT: ", log.LstdFlags)
-	result.Ok("hello world").Log(logger) // Output: RESULT: Ok(hello world)
+	// === Example 6: ParallelWithWorkers ===
+
+	fmt.Println("\n=== Example 6: ParallelWithWorkers ===")
+	// Define several functions that return a Result.
+	functions := []func() result.Result[int]{
+		func() result.Result[int] {
+			time.Sleep(100 * time.Millisecond)
+			return result.Ok(10)
+		},
+		func() result.Result[int] {
+			time.Sleep(50 * time.Millisecond)
+			return result.Err[int](errors.New("failed job"))
+		},
+		func() result.Result[int] {
+			time.Sleep(150 * time.Millisecond)
+			return result.Ok(30)
+		},
+	}
+	parallelResults := result.ParallelWithWorkers(functions, 2)
+	for i, res := range parallelResults {
+		if res.IsOk() {
+			fmt.Printf("Job %d succeeded: %d\n", i, res.Unwrap())
+		} else {
+			fmt.Printf("Job %d failed: %v\n", i, res.UnwrapErr())
+		}
+	}
+
+	// === Example 7: Optional Conversion ===
+
+	fmt.Println("\n=== Example 7: Optional Conversion ===")
+	opt := r1.ToOption()
+	if opt.Valid() {
+		fmt.Println("Option contains:", opt.Value())
+	} else {
+		fmt.Println("Option is invalid")
+	}
+	// Convert Option back to Result.
+	rFromOpt := result.FromOption(opt, errors.New("no value"))
+	fmt.Println("Converted back to Result:", rFromOpt.Unwrap())
+
+	// === Example 8: DebugString and Log ===
+
+	fmt.Println("\n=== Example 8: DebugString and Log ===")
+	logger := log.Default()
+	fmt.Println("r1 debug string:", r1.DebugString())
+	fmt.Println("r2 debug string:", r2.DebugString())
+	r1.Log(logger)
+	r2.Log(logger)
 }
 ```
 
