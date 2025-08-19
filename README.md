@@ -1,13 +1,13 @@
-# `result` - A Comprehensive Result Type for Go
+# `goresult` - A Comprehensive Result Type for Go
 
-The `result` package provides a powerful and extensible **Result type** for Go, inspired by Rust’s `Result`. It simplifies error handling, enables lazy evaluations, supports retries with backoff, facilitates batch operations, and much more.
+The `goresult` package provides a powerful and extensible **Result type** for Go, inspired by Rust’s `Result`. It simplifies error handling, enables lazy evaluations, supports retries with backoff, facilitates batch operations, and much more.
 
 ## Installation
 
 To install the package, run:
 
 ```bash
-go get -u github.com/evdnx/go-result
+go get -u github.com/evdnx/goresult
 ```
 
 ## Features
@@ -37,7 +37,7 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/evdnx/go-result"
+	"github.com/evdnx/goresult"
 )
 
 func main() {
