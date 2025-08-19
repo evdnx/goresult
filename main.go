@@ -2,15 +2,16 @@ package goresult
 
 import (
 	"fmt"
-	"log"
 	"math/rand"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/evdnx/golog"
 )
 
-// Result represents a value that can either be Ok (successful) or Err (failure).
+// Result represents a value that is either Ok (successful) or Err (failure).
 type Result[T any] struct {
 	value T
 	err   error
@@ -18,12 +19,12 @@ type Result[T any] struct {
 
 // --- Constructors ---
 
-// Ok creates a successful Result.
+// Ok creates a successful Result with the given value.
 func Ok[T any](value T) Result[T] {
 	return Result[T]{value: value}
 }
 
-// Err creates a failed Result with an error.
+// Err creates a failed Result with the given error.
 func Err[T any](err error) Result[T] {
 	var zero T
 	return Result[T]{value: zero, err: wrapWithStack(err)}
@@ -31,10 +32,12 @@ func Err[T any](err error) Result[T] {
 
 // --- Basic Operations ---
 
+// IsOk returns true if the Result is Ok.
 func (r Result[T]) IsOk() bool {
 	return r.err == nil
 }
 
+// IsErr returns true if the Result is Err.
 func (r Result[T]) IsErr() bool {
 	return r.err != nil
 }
@@ -63,6 +66,14 @@ func (r Result[T]) UnwrapOr(defaultValue T) T {
 	return r.value
 }
 
+// UnwrapOrElse returns the Ok value or computes a default value using the provided function if Err.
+func (r Result[T]) UnwrapOrElse(f func() T) T {
+	if r.IsErr() {
+		return f()
+	}
+	return r.value
+}
+
 // Or returns the Result if Ok, otherwise returns the alternative.
 func (r Result[T]) Or(alt Result[T]) Result[T] {
 	if r.IsErr() {
@@ -80,7 +91,6 @@ func (r Result[T]) OrElse(f func() Result[T]) Result[T] {
 }
 
 // Map transforms an Ok value with the provided function, leaving an Err untouched.
-// This is a free function because methods cannot have their own type parameters.
 func Map[T any, U any](r Result[T], f func(T) U) Result[U] {
 	if r.IsOk() {
 		return Ok(f(r.value))
@@ -89,7 +99,6 @@ func Map[T any, U any](r Result[T], f func(T) U) Result[U] {
 }
 
 // AndThen chains the Result with a function that returns a new Result.
-// This is a free function because methods cannot have their own type parameters.
 func AndThen[T any, U any](r Result[T], f func(T) Result[U]) Result[U] {
 	if r.IsOk() {
 		return f(r.value)
@@ -97,18 +106,17 @@ func AndThen[T any, U any](r Result[T], f func(T) Result[U]) Result[U] {
 	return Result[U]{err: r.err}
 }
 
-// MapErr transforms the error in an Err Result, leaving an Ok untouched.
-// Since no new type parameter is introduced, it remains a method.
+// MapErr transforms the error in an Err Result, preserving stack traces.
 func (r Result[T]) MapErr(f func(error) error) Result[T] {
 	if r.IsErr() {
-		return Result[T]{value: r.value, err: f(r.err)}
+		return Result[T]{value: r.value, err: wrapWithStack(f(r.err))}
 	}
 	return r
 }
 
 // --- Filtering ---
 
-// Filter applies a predicate to the Ok value; returns Err (with the provided error) if the predicate fails.
+// Filter applies a predicate to the Ok value; returns Err if the predicate fails.
 func (r Result[T]) Filter(predicate func(T) bool, err error) Result[T] {
 	if r.IsOk() && !predicate(r.value) {
 		return Err[T](err)
@@ -118,16 +126,19 @@ func (r Result[T]) Filter(predicate func(T) bool, err error) Result[T] {
 
 // --- Retry with Backoff ---
 
-// BackoffConfig contains the configuration for the retry backoff.
+// BackoffConfig defines parameters for retry backoff.
 type BackoffConfig struct {
-	InitialDelay time.Duration
-	MaxDelay     time.Duration
-	Factor       float64
-	Jitter       float64
+	InitialDelay time.Duration // Initial delay between retries
+	MaxDelay     time.Duration // Maximum delay between retries
+	Factor       float64       // Multiplier for exponential backoff
+	Jitter       float64       // Jitter factor to add randomness
 }
 
-// RetryWithBackoff retries a function with exponential backoff.
+// RetryWithBackoff retries a function with exponential backoff until success or max attempts.
 func RetryWithBackoff[T any](attempts int, fn func() Result[T], cfg BackoffConfig) Result[T] {
+	if attempts < 1 {
+		return Err[T](fmt.Errorf("invalid attempt count: %d", attempts))
+	}
 	delay := cfg.InitialDelay
 	var lastErr error
 	for i := 0; i < attempts; i++ {
@@ -144,7 +155,7 @@ func RetryWithBackoff[T any](attempts int, fn func() Result[T], cfg BackoffConfi
 			}
 		}
 	}
-	return Err[T](fmt.Errorf("all retries failed: %w", lastErr))
+	return Err[T](fmt.Errorf("all %d retries failed: %w", attempts, lastErr))
 }
 
 func addJitter(duration time.Duration, jitterFactor float64) time.Duration {
@@ -154,10 +165,10 @@ func addJitter(duration time.Duration, jitterFactor float64) time.Duration {
 
 // --- Batch Operations ---
 
-// Batch processes multiple Results and separates Ok and Err values.
-func Batch[T any](results []Result[T]) ([]T, []error) {
-	var oks []T
-	var errs []error
+// BatchResults processes multiple Results and separates Ok values and errors.
+func BatchResults[T any](results []Result[T]) (oks []T, errs []error) {
+	oks = make([]T, 0, len(results))
+	errs = make([]error, 0, len(results))
 	for _, r := range results {
 		if r.IsOk() {
 			oks = append(oks, r.value)
@@ -173,19 +184,35 @@ func AggregateErrors(errs []error) error {
 	if len(errs) == 0 {
 		return nil
 	}
+	if len(errs) == 1 {
+		return errs[0]
+	}
 	messages := make([]string, 0, len(errs))
 	for _, err := range errs {
 		messages = append(messages, err.Error())
 	}
-	return fmt.Errorf("aggregate error: %s", strings.Join(messages, "; "))
+	return fmt.Errorf("multiple errors occurred: %s", strings.Join(messages, "; "))
 }
 
 // --- Optional Conversion ---
 
-// Option is a simple optional type.
+// Option represents an optional value.
 type Option[T any] struct {
 	value T
 	valid bool
+}
+
+// Valid returns true if the Option contains a value.
+func (o Option[T]) Valid() bool {
+	return o.valid
+}
+
+// Value returns the contained value (panics if invalid).
+func (o Option[T]) Value() T {
+	if !o.valid {
+		panic("called Value on an invalid Option")
+	}
+	return o.value
 }
 
 // ToOption converts a Result to an Option (Ok becomes valid, Err becomes invalid).
@@ -193,7 +220,7 @@ func (r Result[T]) ToOption() Option[T] {
 	if r.IsOk() {
 		return Option[T]{value: r.value, valid: true}
 	}
-	return Option[T]{valid: false}
+	return Option[T]{}
 }
 
 // FromOption converts an Option to a Result, using the provided error if the Option is invalid.
@@ -208,6 +235,9 @@ func FromOption[T any](opt Option[T], err error) Result[T] {
 
 // ParallelWithWorkers executes multiple functions concurrently using a worker pool.
 func ParallelWithWorkers[T any](fns []func() Result[T], workers int) []Result[T] {
+	if workers < 1 {
+		workers = 1
+	}
 	results := make([]Result[T], len(fns))
 	var wg sync.WaitGroup
 	taskChan := make(chan int, len(fns))
@@ -235,23 +265,20 @@ func ParallelWithWorkers[T any](fns []func() Result[T], workers int) []Result[T]
 
 // --- Debugging and Logging ---
 
-// DebugString provides a detailed string representation of the Result for debugging.
+// DebugString provides a concise string representation of the Result for debugging.
 func (r Result[T]) DebugString() string {
 	if r.IsOk() {
 		return fmt.Sprintf("Ok(%v)", r.value)
 	}
-	if err, ok := r.err.(*stackError); ok {
-		return fmt.Sprintf("Err(%s)\nStack trace:\n%s", err.err.Error(), err.stack)
-	}
 	return fmt.Sprintf("Err(%v)", r.err)
 }
 
-// Log writes the Result to a provided logger.
-func (r Result[T]) Log(logger *log.Logger) {
+// Log writes a structured log message using the provided golog.Logger.
+func (r Result[T]) Log(logger *golog.Logger) {
 	if r.IsOk() {
-		logger.Printf("Ok(%v)", r.value)
+		logger.Info("Result", golog.String("status", "Ok"), golog.Any("value", r.value))
 	} else {
-		logger.Printf("Err(%v)", r.err)
+		logger.Error("Result", golog.String("status", "Err"), golog.Error(r.err))
 	}
 }
 
@@ -264,23 +291,34 @@ type stackError struct {
 }
 
 func (e *stackError) Error() string {
-	return fmt.Sprintf("%s\nStack trace:\n%s", e.err.Error(), e.stack)
+	return e.err.Error()
 }
 
-// wrapWithStack returns an error that includes a stack trace.
-// If the error already has a stack trace, it is returned as is.
+// Unwrap returns the underlying error for error unwrapping.
+func (e *stackError) Unwrap() error {
+	return e.err
+}
+
+// StackTrace returns the stack trace as a string.
+func (e *stackError) StackTrace() string {
+	return e.stack
+}
+
+// wrapWithStack adds a stack trace to an error if it doesn't already have one.
 func wrapWithStack(err error) error {
 	if err == nil {
 		return nil
 	}
-	if _, ok := err.(*stackError); ok {
-		return err
+	if se, ok := err.(*stackError); ok {
+		return se
 	}
 	pcs := make([]uintptr, 32)
 	n := runtime.Callers(3, pcs)
 	pcs = pcs[:n]
-	stackTrace := strings.Join(formatStack(pcs, 10), "\n")
-	return &stackError{err: err, stack: stackTrace}
+	return &stackError{
+		err:   err,
+		stack: strings.Join(formatStack(pcs, 10), "\n"),
+	}
 }
 
 func formatStack(pcs []uintptr, maxFrames int) []string {
@@ -289,14 +327,14 @@ func formatStack(pcs []uintptr, maxFrames int) []string {
 	count := 0
 	for {
 		frame, more := frames.Next()
-		formatted = append(formatted, fmt.Sprintf("%s\n\t%s:%d", frame.Function, frame.File, frame.Line))
+		formatted = append(formatted, fmt.Sprintf("%s:%d %s", frame.File, frame.Line, frame.Function))
 		count++
 		if !more || (maxFrames > 0 && count >= maxFrames) {
 			break
 		}
 	}
 	if maxFrames > 0 && len(pcs) > maxFrames {
-		formatted = append(formatted, fmt.Sprintf("... and %d more", len(pcs)-maxFrames))
+		formatted = append(formatted, fmt.Sprintf("... and %d more frames", len(pcs)-maxFrames))
 	}
 	return formatted
 }
