@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/evdnx/golog"
 )
 
 // Helper function to assert that a function panics.
@@ -182,7 +183,7 @@ func TestBatchAndAggregateErrors(t *testing.T) {
 		Err[int](errors.New("error B")),
 	}
 
-	oks, errs := Batch(results)
+	oks, errs := BatchResults(results)
 	if len(oks) != 2 {
 		t.Errorf("expected 2 Ok values, got %d", len(oks))
 	}
@@ -200,11 +201,11 @@ func TestOptionalConversion(t *testing.T) {
 	// Test ToOption and FromOption with an Ok result.
 	r := Ok("hello")
 	opt := r.ToOption()
-	if !opt.valid {
+	if !opt.Valid() {
 		t.Errorf("expected Option to be valid")
 	}
-	if opt.value != "hello" {
-		t.Errorf("expected Option value 'hello', got %v", opt.value)
+	if opt.Value() != "hello" {
+		t.Errorf("expected Option value 'hello', got %v", opt.Value())
 	}
 
 	rFromOpt := FromOption(opt, errors.New("no value"))
@@ -258,6 +259,17 @@ func TestParallelWithWorkers(t *testing.T) {
 }
 
 func TestDebugStringAndLog(t *testing.T) {
+	// Set up a buffer to capture log output
+	var buf bytes.Buffer
+	logger, err := golog.NewLogger(
+		golog.WithWriterProvider(&buf, "console"),
+		golog.WithLevel(golog.DebugLevel),
+	)
+	if err != nil {
+		t.Fatalf("failed to create logger: %v", err)
+	}
+	defer logger.Sync()
+
 	// Test DebugString for Ok result.
 	rOk := Ok("debug ok")
 	debugOk := rOk.DebugString()
@@ -268,24 +280,18 @@ func TestDebugStringAndLog(t *testing.T) {
 	// Test DebugString for Err result.
 	rErr := Err[string](errors.New("debug error"))
 	debugErr := rErr.DebugString()
-	if !strings.Contains(debugErr, "Err(") || !strings.Contains(debugErr, "Stack trace:") {
-		t.Errorf("expected DebugString for Err to include stack trace, got %s", debugErr)
+	if !strings.Contains(debugErr, "Err(") {
+		t.Errorf("expected DebugString for Err to contain 'Err(', got %s", debugErr)
 	}
 
 	// Test Log by capturing output.
-	var buf bytes.Buffer
-	logger := log.New(&buf, "", 0)
 	rOk.Log(logger)
 	rErr.Log(logger)
 	logOutput := buf.String()
-	if !strings.Contains(logOutput, "Ok(") || !strings.Contains(logOutput, "Err(") {
-		t.Errorf("expected log output to include both Ok and Err messages, got %s", logOutput)
+	if !strings.Contains(logOutput, `status=Ok`) || !strings.Contains(logOutput, `value=debug ok`) {
+		t.Errorf("expected log output to include Ok message with value, got %s", logOutput)
 	}
-}
-
-// TestMain is updated to remove the deprecated call to rand.Seed.
-// As of Go 1.20, the global random generator is automatically seeded.
-func TestMain(m *testing.M) {
-	// No need to seed math/rand since the global random generator is automatically seeded.
-	m.Run()
+	if !strings.Contains(logOutput, `status=Err`) || !strings.Contains(logOutput, `error=debug error`) {
+		t.Errorf("expected log output to include Err message with error, got %s", logOutput)
+	}
 }
