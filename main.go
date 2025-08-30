@@ -11,38 +11,39 @@ import (
 	"github.com/evdnx/golog"
 )
 
-// Result represents a value that is either Ok (successful) or Err (failure).
+// -----------------------------------------------------------------------------
+// Result – a generic container for a value or an error.
+// -----------------------------------------------------------------------------
+
+// Result holds either a successful value of type T or an error.
+// The zero value of Result is an Err with a nil error, which is rarely useful
+// – use the constructors below.
 type Result[T any] struct {
 	value T
 	err   error
 }
 
-// --- Constructors ---
+// Ok creates a successful Result containing the supplied value.
+func Ok[T any](value T) Result[T] { return Result[T]{value: value} }
 
-// Ok creates a successful Result with the given value.
-func Ok[T any](value T) Result[T] {
-	return Result[T]{value: value}
-}
-
-// Err creates a failed Result with the given error.
+// Err creates a failed Result wrapping the supplied error with a stack trace.
 func Err[T any](err error) Result[T] {
 	var zero T
 	return Result[T]{value: zero, err: wrapWithStack(err)}
 }
 
-// --- Basic Operations ---
+// -----------------------------------------------------------------------------
+// Basic predicates
+// -----------------------------------------------------------------------------
 
-// IsOk returns true if the Result is Ok.
-func (r Result[T]) IsOk() bool {
-	return r.err == nil
-}
+func (r Result[T]) IsOk() bool  { return r.err == nil }
+func (r Result[T]) IsErr() bool { return r.err != nil }
 
-// IsErr returns true if the Result is Err.
-func (r Result[T]) IsErr() bool {
-	return r.err != nil
-}
+// -----------------------------------------------------------------------------
+// Unwrapping helpers
+// -----------------------------------------------------------------------------
 
-// Unwrap returns the Ok value or panics if the Result is Err.
+// Unwrap returns the inner value or panics if the Result is Err.
 func (r Result[T]) Unwrap() T {
 	if r.IsErr() {
 		panic(fmt.Sprintf("called Unwrap on an Err result: %v", r.err))
@@ -50,7 +51,7 @@ func (r Result[T]) Unwrap() T {
 	return r.value
 }
 
-// UnwrapErr returns the Err error or panics if the Result is Ok.
+// UnwrapErr returns the inner error or panics if the Result is Ok.
 func (r Result[T]) UnwrapErr() error {
 	if r.IsOk() {
 		panic(fmt.Sprintf("called UnwrapErr on an Ok result: %v", r.value))
@@ -58,7 +59,7 @@ func (r Result[T]) UnwrapErr() error {
 	return r.err
 }
 
-// UnwrapOr returns the Ok value or a provided default if Err.
+// UnwrapOr returns the value if Ok, otherwise the supplied default.
 func (r Result[T]) UnwrapOr(defaultValue T) T {
 	if r.IsErr() {
 		return defaultValue
@@ -66,7 +67,7 @@ func (r Result[T]) UnwrapOr(defaultValue T) T {
 	return r.value
 }
 
-// UnwrapOrElse returns the Ok value or computes a default value using the provided function if Err.
+// UnwrapOrElse returns the value if Ok, otherwise computes a fallback via f.
 func (r Result[T]) UnwrapOrElse(f func() T) T {
 	if r.IsErr() {
 		return f()
@@ -74,7 +75,11 @@ func (r Result[T]) UnwrapOrElse(f func() T) T {
 	return r.value
 }
 
-// Or returns the Result if Ok, otherwise returns the alternative.
+// -----------------------------------------------------------------------------
+// Alternative fallbacks
+// -----------------------------------------------------------------------------
+
+// Or returns r if it is Ok, otherwise returns alt.
 func (r Result[T]) Or(alt Result[T]) Result[T] {
 	if r.IsErr() {
 		return alt
@@ -82,7 +87,7 @@ func (r Result[T]) Or(alt Result[T]) Result[T] {
 	return r
 }
 
-// OrElse returns the Result if Ok, otherwise calls the provided function to get an alternative.
+// OrElse returns r if it is Ok, otherwise evaluates f to obtain an alternative.
 func (r Result[T]) OrElse(f func() Result[T]) Result[T] {
 	if r.IsErr() {
 		return f()
@@ -90,7 +95,11 @@ func (r Result[T]) OrElse(f func() Result[T]) Result[T] {
 	return r
 }
 
-// Map transforms an Ok value with the provided function, leaving an Err untouched.
+// -----------------------------------------------------------------------------
+// Transformations
+// -----------------------------------------------------------------------------
+
+// Map applies f to the Ok value, preserving any Err unchanged.
 func Map[T any, U any](r Result[T], f func(T) U) Result[U] {
 	if r.IsOk() {
 		return Ok(f(r.value))
@@ -98,7 +107,7 @@ func Map[T any, U any](r Result[T], f func(T) U) Result[U] {
 	return Result[U]{err: r.err}
 }
 
-// AndThen chains the Result with a function that returns a new Result.
+// AndThen chains r with a function that returns another Result.
 func AndThen[T any, U any](r Result[T], f func(T) Result[U]) Result[U] {
 	if r.IsOk() {
 		return f(r.value)
@@ -106,7 +115,7 @@ func AndThen[T any, U any](r Result[T], f func(T) Result[U]) Result[U] {
 	return Result[U]{err: r.err}
 }
 
-// MapErr transforms the error in an Err Result, preserving stack traces.
+// MapErr transforms the error while preserving the original stack trace.
 func (r Result[T]) MapErr(f func(error) error) Result[T] {
 	if r.IsErr() {
 		return Result[T]{value: r.value, err: wrapWithStack(f(r.err))}
@@ -114,9 +123,11 @@ func (r Result[T]) MapErr(f func(error) error) Result[T] {
 	return r
 }
 
-// --- Filtering ---
+// -----------------------------------------------------------------------------
+// Filtering
+// -----------------------------------------------------------------------------
 
-// Filter applies a predicate to the Ok value; returns Err if the predicate fails.
+// Filter validates the Ok value with predicate; on failure it returns Err(err).
 func (r Result[T]) Filter(predicate func(T) bool, err error) Result[T] {
 	if r.IsOk() && !predicate(r.value) {
 		return Err[T](err)
@@ -124,31 +135,35 @@ func (r Result[T]) Filter(predicate func(T) bool, err error) Result[T] {
 	return r
 }
 
-// --- Retry with Backoff ---
+// -----------------------------------------------------------------------------
+// Retry with exponential back‑off
+// -----------------------------------------------------------------------------
 
-// BackoffConfig defines parameters for retry backoff.
+// BackoffConfig configures the retry strategy.
 type BackoffConfig struct {
-	InitialDelay time.Duration // Initial delay between retries
-	MaxDelay     time.Duration // Maximum delay between retries
-	Factor       float64       // Multiplier for exponential backoff
-	Jitter       float64       // Jitter factor to add randomness
+	InitialDelay time.Duration // first pause before a retry
+	MaxDelay     time.Duration // ceiling for the pause
+	Factor       float64       // exponential multiplier (>1)
+	Jitter       float64       // proportion of jitter (0–1)
 }
 
-// RetryWithBackoff retries a function with exponential backoff until success or max attempts.
+// RetryWithBackoff repeatedly invokes fn until it succeeds or attempts are exhausted.
 func RetryWithBackoff[T any](attempts int, fn func() Result[T], cfg BackoffConfig) Result[T] {
 	if attempts < 1 {
 		return Err[T](fmt.Errorf("invalid attempt count: %d", attempts))
 	}
 	delay := cfg.InitialDelay
 	var lastErr error
+
 	for i := 0; i < attempts; i++ {
 		res := fn()
 		if res.IsOk() {
 			return res
 		}
 		lastErr = res.err
+
 		if i < attempts-1 {
-			time.Sleep(addJitter(delay, cfg.Jitter))
+			time.Sleep(applyJitter(delay, cfg.Jitter))
 			delay = time.Duration(float64(delay) * cfg.Factor)
 			if delay > cfg.MaxDelay {
 				delay = cfg.MaxDelay
@@ -158,14 +173,24 @@ func RetryWithBackoff[T any](attempts int, fn func() Result[T], cfg BackoffConfi
 	return Err[T](fmt.Errorf("all %d retries failed: %w", attempts, lastErr))
 }
 
-func addJitter(duration time.Duration, jitterFactor float64) time.Duration {
-	jitter := time.Duration(float64(duration) * jitterFactor * (0.5 - rand.Float64()))
-	return duration + jitter
+// applyJitter adds a random offset (± jitterFactor/2) to the base duration.
+// Guarantees a non‑negative result.
+func applyJitter(base time.Duration, jitterFactor float64) time.Duration {
+	if jitterFactor <= 0 {
+		return base
+	}
+	jitter := time.Duration(float64(base) * jitterFactor * (rand.Float64() - 0.5))
+	if jitter < 0 {
+		jitter = -jitter
+	}
+	return base + jitter
 }
 
-// --- Batch Operations ---
+// -----------------------------------------------------------------------------
+// Batch utilities
+// -----------------------------------------------------------------------------
 
-// BatchResults processes multiple Results and separates Ok values and errors.
+// BatchResults separates successful values from errors.
 func BatchResults[T any](results []Result[T]) (oks []T, errs []error) {
 	oks = make([]T, 0, len(results))
 	errs = make([]error, 0, len(results))
@@ -179,35 +204,36 @@ func BatchResults[T any](results []Result[T]) (oks []T, errs []error) {
 	return oks, errs
 }
 
-// AggregateErrors combines multiple errors into a single error.
+// AggregateErrors merges several errors into a single one.
 func AggregateErrors(errs []error) error {
-	if len(errs) == 0 {
+	switch len(errs) {
+	case 0:
 		return nil
-	}
-	if len(errs) == 1 {
+	case 1:
 		return errs[0]
+	default:
+		msgs := make([]string, len(errs))
+		for i, e := range errs {
+			msgs[i] = e.Error()
+		}
+		return fmt.Errorf("multiple errors occurred: %s", strings.Join(msgs, "; "))
 	}
-	messages := make([]string, 0, len(errs))
-	for _, err := range errs {
-		messages = append(messages, err.Error())
-	}
-	return fmt.Errorf("multiple errors occurred: %s", strings.Join(messages, "; "))
 }
 
-// --- Optional Conversion ---
+// -----------------------------------------------------------------------------
+// Option conversion
+// -----------------------------------------------------------------------------
 
-// Option represents an optional value.
+// Option mirrors the semantics of stdlib’s sql.Null* types.
 type Option[T any] struct {
 	value T
 	valid bool
 }
 
-// Valid returns true if the Option contains a value.
-func (o Option[T]) Valid() bool {
-	return o.valid
-}
+// Valid reports whether the Option holds a value.
+func (o Option[T]) Valid() bool { return o.valid }
 
-// Value returns the contained value (panics if invalid).
+// Value returns the stored value; panics if invalid.
 func (o Option[T]) Value() T {
 	if !o.valid {
 		panic("called Value on an invalid Option")
@@ -215,7 +241,7 @@ func (o Option[T]) Value() T {
 	return o.value
 }
 
-// ToOption converts a Result to an Option (Ok becomes valid, Err becomes invalid).
+// ToOption converts a Result into an Option.
 func (r Result[T]) ToOption() Option[T] {
 	if r.IsOk() {
 		return Option[T]{value: r.value, valid: true}
@@ -223,7 +249,7 @@ func (r Result[T]) ToOption() Option[T] {
 	return Option[T]{}
 }
 
-// FromOption converts an Option to a Result, using the provided error if the Option is invalid.
+// FromOption builds a Result from an Option, using err when the Option is invalid.
 func FromOption[T any](opt Option[T], err error) Result[T] {
 	if opt.valid {
 		return Ok(opt.value)
@@ -231,41 +257,52 @@ func FromOption[T any](opt Option[T], err error) Result[T] {
 	return Err[T](err)
 }
 
-// --- Parallel Execution with Worker Pool ---
+// -----------------------------------------------------------------------------
+// Parallel execution with a bounded worker pool
+// -----------------------------------------------------------------------------
 
-// ParallelWithWorkers executes multiple functions concurrently using a worker pool.
+// ParallelWithWorkers runs each function in fns concurrently, limited to workers goroutines.
+// It recovers from panics inside the workers and records them as errors.
 func ParallelWithWorkers[T any](fns []func() Result[T], workers int) []Result[T] {
 	if workers < 1 {
 		workers = 1
 	}
 	results := make([]Result[T], len(fns))
 	var wg sync.WaitGroup
-	taskChan := make(chan int, len(fns))
+	taskCh := make(chan int, len(fns))
 
-	// Spawn worker goroutines.
+	// Launch workers.
 	for i := 0; i < workers; i++ {
 		go func() {
-			for idx := range taskChan {
-				results[idx] = fns[idx]()
-				wg.Done()
+			for idx := range taskCh {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							results[idx] = Err[T](fmt.Errorf("panic: %v", r))
+						}
+						wg.Done()
+					}()
+					results[idx] = fns[idx]()
+				}()
 			}
 		}()
 	}
 
-	// Enqueue tasks.
+	// Feed tasks.
 	wg.Add(len(fns))
-	for idx := range fns {
-		taskChan <- idx
+	for i := range fns {
+		taskCh <- i
 	}
-	close(taskChan)
+	close(taskCh)
 	wg.Wait()
-
 	return results
 }
 
-// --- Debugging and Logging ---
+// -----------------------------------------------------------------------------
+// Debug / logging helpers
+// -----------------------------------------------------------------------------
 
-// DebugString provides a concise string representation of the Result for debugging.
+// DebugString returns a short human‑readable representation.
 func (r Result[T]) DebugString() string {
 	if r.IsOk() {
 		return fmt.Sprintf("Ok(%v)", r.value)
@@ -273,44 +310,37 @@ func (r Result[T]) DebugString() string {
 	return fmt.Sprintf("Err(%v)", r.err)
 }
 
-// Log writes a structured log message using the provided golog.Logger.
+// Log emits a structured log entry using the supplied golog.Logger.
 func (r Result[T]) Log(logger *golog.Logger) {
 	if r.IsOk() {
 		logger.Info("Result", golog.String("status", "Ok"), golog.Any("value", r.value))
 	} else {
-		logger.Error("Result", golog.String("status", "Err"), golog.Error(r.err))
+		logger.Error("Result", golog.String("status", "Err"), golog.Err(r.err))
 	}
 }
 
-// --- Stack Trace Utilities ---
+// -----------------------------------------------------------------------------
+// Stack‑trace utilities (internal)
+// -----------------------------------------------------------------------------
 
-// stackError wraps an error with a stack trace.
 type stackError struct {
 	err   error
 	stack string
 }
 
-func (e *stackError) Error() string {
-	return e.err.Error()
-}
-
-// Unwrap returns the underlying error for error unwrapping.
-func (e *stackError) Unwrap() error {
-	return e.err
-}
-
-// StackTrace returns the stack trace as a string.
+func (e *stackError) Error() string { return e.err.Error() }
+func (e *stackError) Unwrap() error { return e.err }
 func (e *stackError) StackTrace() string {
 	return e.stack
 }
 
-// wrapWithStack adds a stack trace to an error if it doesn't already have one.
+// wrapWithStack decorates err with a stack trace if it lacks one.
 func wrapWithStack(err error) error {
 	if err == nil {
 		return nil
 	}
-	if se, ok := err.(*stackError); ok {
-		return se
+	if _, ok := err.(*stackError); ok {
+		return err
 	}
 	pcs := make([]uintptr, 32)
 	n := runtime.Callers(3, pcs)
@@ -321,20 +351,21 @@ func wrapWithStack(err error) error {
 	}
 }
 
+// formatStack turns program counters into a slice of readable frames.
 func formatStack(pcs []uintptr, maxFrames int) []string {
 	frames := runtime.CallersFrames(pcs)
-	var formatted []string
+	var out []string
 	count := 0
 	for {
-		frame, more := frames.Next()
-		formatted = append(formatted, fmt.Sprintf("%s:%d %s", frame.File, frame.Line, frame.Function))
+		f, more := frames.Next()
+		out = append(out, fmt.Sprintf("%s:%d %s", f.File, f.Line, f.Function))
 		count++
 		if !more || (maxFrames > 0 && count >= maxFrames) {
 			break
 		}
 	}
 	if maxFrames > 0 && len(pcs) > maxFrames {
-		formatted = append(formatted, fmt.Sprintf("... and %d more frames", len(pcs)-maxFrames))
+		out = append(out, fmt.Sprintf("... and %d more frames", len(pcs)-maxFrames))
 	}
-	return formatted
+	return out
 }
