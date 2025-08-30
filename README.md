@@ -1,232 +1,298 @@
-# `goresult` - A Comprehensive Result Type for Go
+# `goresult` – A Comprehensive Result Type for Go
 
-The `goresult` package provides a powerful and extensible **Result type** for Go, inspired by Rust’s `Result`. It simplifies error handling, enables lazy evaluations, supports retries with backoff, facilitates batch operations, and much more.
+The **goresult** package provides a powerful, extensible `Result` type for Go, inspired by Rust’s `Result`.  
+It streamlines error handling, supports lazy evaluation, offers configurable retries with exponential back‑off, enables batch processing, and includes first‑class concurrency primitives.
 
-## Installation
+---
 
-To install the package, run:
+## Table of Contents
 
+1. [Installation](#installation)  
+2. [Features Overview](#features-overview)  
+3. [Quick Start](#quick-start)  
+4. [Core Types & Functions](#core-types--functions)  
+5. [Advanced Usage](#advanced-usage)  
+   - [Retry with Backoff](#retry-with-backoff)  
+   - [Batch Processing & Aggregated Errors](#batch-processing--aggregated-errors)  
+   - [Parallel Execution with Worker Pools](#parallel-execution-with-worker-pools)  
+   - [Optional Conversion](#optional-conversion)  
+   - [Debugging & Structured Logging](#debugging--structured-logging)  
+6. [Configuration Details](#configuration-details)  
+7. [Dependencies](#dependencies)  
+8. [Contributing](#contributing)  
+9. [License](#license)
+
+---
+
+## Installation  
 ```bash
-go get -u github.com/evdnx/goresult
+    go get -u github.com/evdnx/goresult
 ```
 
-## Features
+**Note:** Requires Go 1.20+ (generics).
 
-- **Result Type**: Use `Ok` for successful results and `Err` for errors.
-- **Lazy Evaluation**: Handle errors dynamically with `OrElse` and `Filter`.
-- **Retry with Backoff**: Configurable retries with exponential backoff and jitter.
-- **Batch Processing**: Aggregate results into successes and errors.
-- **Optional Conversion**: Seamlessly convert between `Result` and optional values.
-- **Debugging and Logging**: Structured error logging with stack traces using `golog`.
-- **Concurrency**: Support for parallel execution with worker pools.
-- **Mapping and Chaining:**
-	- Map: Transforms a successful Result by applying a function to its value.
-	- AndThen: Chains a computation that returns a new Result, useful for composing operations.
+---
 
-## Example Usage
+## Features Overview
 
-Here’s a complete Go program demonstrating the key features of the `goresult` package:
+| Category                     | Description                                                                                 |
+|------------------------------|---------------------------------------------------------------------------------------------|
+| **Result Type**              | `Ok` for success, `Err` for failure, with rich unwrapping helpers.                        |
+| **Lazy Evaluation**          | `OrElse`, `Filter` defer expensive work until needed.                                       |
+| **Retry Logic**              | `RetryWithBackoff` with exponential back‑off, jitter, and configurable limits.            |
+| **Batch Processing**         | `BatchResults` splits a slice of `Result`s into successes and errors; `AggregateErrors` merges them. |
+| **Optional Conversion**      | Interop with optional/value types via `ToOption` / `FromOption`.                           |
+| **Debugging & Logging**      | Automatic stack‑trace enrichment, `DebugString`, and `Log` integration with `golog`.        |
+| **Concurrency**              | `ParallelWithWorkers` runs arbitrary `Result`‑producing functions in a safe worker pool (panic‑recovery included). |
+| **Mapping & Chaining**       | `Map`, `MapErr`, `AndThen` enable functional composition.                                   |
 
+---
+
+## Quick Start
 ```go
-package main
+    package main
 
-import (
-	"errors"
-	"fmt"
-	"math/rand"
-	"time"
+    import (
+        "errors"
+        "fmt"
+        "math/rand"
+        "time"
 
-	"github.com/evdnx/goresult"
-	"github.com/evdnx/golog"
-)
+        "github.com/evdnx/goresult"
+        "github.com/evdnx/golog"
+    )
 
-func main() {
-	// Seed the random number generator (used by addJitter)
-	rand.Seed(time.Now().UnixNano())
+    func main() {
+        // Initialise logger (stdout provider)
+        logger, _ := golog.NewLogger(
+            golog.WithStdOutProvider("console"),
+            golog.WithLevel(golog.DebugLevel),
+        )
+        defer logger.Sync()
 
-	// Initialize golog logger with stdout provider
-	logger, err := golog.NewLogger(
-		golog.WithStdOutProvider("console"),
-		golog.WithLevel(golog.DebugLevel),
-	)
-	if err != nil {
-		panic(err)
-	}
-	defer logger.Sync()
+        // -------------------------------------------------
+        // 1️⃣ Basic usage – Ok / Err / Unwrap helpers
+        // -------------------------------------------------
+        r1 := goresult.Ok(42)
+        fmt.Println("r1 is Ok:", r1.IsOk())
+        fmt.Println("r1 value:", r1.Unwrap())
 
-	// === Example 1: Basic Usage (Ok, Err, Unwrap, UnwrapErr, UnwrapOr) ===
+        r2 := goresult.Err[int](errors.New("something went wrong"))
+        fmt.Println("r2 is Err:", r2.IsErr())
+        fmt.Println("r2 error:", r2.UnwrapErr())
 
-	fmt.Println("=== Example 1: Basic Usage ===")
-	// Creating an Ok result.
-	r1 := goresult.Ok(42)
-	fmt.Println("r1 is Ok:", r1.IsOk())
-	fmt.Println("r1 value:", r1.Unwrap())
+        // Provide a fallback value when the result is an error.
+        r3 := goresult.Err[int](errors.New("failure"))
+        fmt.Println("r3 with default:", r3.UnwrapOr(100))
 
-	// Creating an Err result.
-	r2 := goresult.Err[int](errors.New("something went wrong"))
-	fmt.Println("r2 is Err:", r2.IsErr())
-	// Trying to unwrap r2 as a value would panic.
-	// Instead, we unwrap the error:
-	fmt.Println("r2 error:", r2.UnwrapErr())
+        // -------------------------------------------------
+        // 2️⃣ Mapping & chaining
+        // -------------------------------------------------
+        double := func(x int) int { return x * 2 }
+        mapped := goresult.Map(r1, double)
+        fmt.Println("mapped (double):", mapped.Unwrap())
 
-	// Using UnwrapOr to provide a default value.
-	r3 := goresult.Err[int](errors.New("failure"))
-	fmt.Println("r3 value with default:", r3.UnwrapOr(100))
+        toString := func(x int) goresult.Result[string] {
+            if x < 50 {
+                return goresult.Ok(fmt.Sprintf("Number %d is small", x))
+            }
+            return goresult.Ok(fmt.Sprintf("Number %d is large", x))
+        }
+        chained := goresult.AndThen(mapped, toString)
+        fmt.Println("chained:", chained.Unwrap())
 
-	// === Example 2: Using Map and AndThen ===
+        // -------------------------------------------------
+        // 3️⃣ Filtering
+        // -------------------------------------------------
+        isEven := func(x int) bool { return x%2 == 0 }
+        filtered := r1.Filter(isEven, errors.New("not even"))
+        if filtered.IsOk() {
+            fmt.Println("filtered passes:", filtered.Unwrap())
+        } else {
+            fmt.Println("filtered rejects:", filtered.UnwrapErr())
+        }
 
-	fmt.Println("\n=== Example 2: Map and AndThen ===")
-	// Define a function to double a number.
-	double := func(x int) int { return x * 2 }
+        // -------------------------------------------------
+        // 4️⃣ Retry with back‑off
+        // -------------------------------------------------
+        attempt := 0
+        retryFn := func() goresult.Result[string] {
+            attempt++
+            if attempt < 3 {
+                return goresult.Err[string](errors.New("temporary failure"))
+            }
+            return goresult.Ok(fmt.Sprintf("success on attempt %d", attempt))
+        }
+        cfg := goresult.BackoffConfig{
+            InitialDelay: 100 * time.Millisecond,
+            MaxDelay:     1 * time.Second,
+            Factor:       2,
+            Jitter:       0.1,
+        }
+        if res := goresult.RetryWithBackoff(5, retryFn, cfg); res.IsOk() {
+            fmt.Println("retry succeeded:", res.Unwrap())
+        } else {
+            fmt.Println("retry failed:", res.UnwrapErr())
+        }
 
-	// Map r1 (an Ok result) to double its value.
-	mapped := goresult.Map(r1, double)
-	fmt.Println("Mapped r1 (doubled):", mapped.Unwrap())
+        // -------------------------------------------------
+        // 5️⃣ Batch processing & aggregated errors
+        // -------------------------------------------------
+        tasks := []goresult.Result[int]{
+            goresult.Ok(1),
+            goresult.Err[int](errors.New("task 2 failed")),
+            goresult.Ok(3),
+            goresult.Err[int](errors.New("task 4 failed")),
+        }
+        oks, errs := goresult.BatchResults(tasks)
+        fmt.Println("ok values:", oks)
+        fmt.Println("errors:", errs)
+        fmt.Println("aggregated error:", goresult.AggregateErrors(errs))
 
-	// AndThen (chain) a computation that returns a new Result.
-	toString := func(x int) goresult.Result[string] {
-		if x < 50 {
-			return goresult.Ok(fmt.Sprintf("Number %d is small", x))
-		}
-		return goresult.Ok(fmt.Sprintf("Number %d is large", x))
-	}
-	chained := goresult.AndThen(mapped, toString)
-	fmt.Println("Chained result:", chained.Unwrap())
+        // -------------------------------------------------
+        // 6️⃣ Parallel execution with workers
+        // -------------------------------------------------
+        funcs := []func() goresult.Result[int]{
+            func() goresult.Result[int] { time.Sleep(100 * time.Millisecond); return goresult.Ok(10) },
+            func() goresult.Result[int] { time.Sleep(50 * time.Millisecond); return goresult.Err[int](errors.New("job failed")) },
+            func() goresult.Result[int] { time.Sleep(150 * time.Millisecond); return goresult.Ok(30) },
+        }
+        results := goresult.ParallelWithWorkers(funcs, 2)
+        for i, r := range results {
+            if r.IsOk() {
+                fmt.Printf("job %d succeeded: %d\n", i, r.Unwrap())
+            } else {
+                fmt.Printf("job %d failed: %v\n", i, r.UnwrapErr())
+            }
+        }
 
-	// === Example 3: Filtering ===
+        // -------------------------------------------------
+        // 7️⃣ Optional conversion
+        // -------------------------------------------------
+        opt := r1.ToOption()
+        if opt.Valid() {
+            fmt.Println("option contains:", opt.Value())
+        }
+        fmt.Println("back to Result:", goresult.FromOption(opt, errors.New("empty")).Unwrap())
 
-	fmt.Println("\n=== Example 3: Filter ===")
-	// Filter to only allow even numbers.
-	isEven := func(x int) bool { return x%2 == 0 }
-	filtered := r1.Filter(isEven, errors.New("number is not even"))
-	if filtered.IsOk() {
-		fmt.Println("Filtered r1 passes:", filtered.Unwrap())
-	} else {
-		fmt.Println("Filtered r1 rejected:", filtered.UnwrapErr())
-	}
-
-	// === Example 4: RetryWithBackoff ===
-
-	fmt.Println("\n=== Example 4: RetryWithBackoff ===")
-	// A function that fails a couple of times before succeeding.
-	attempt := 0
-	retryFn := func() goresult.Result[string] {
-		attempt++
-		if attempt < 3 {
-			return goresult.Err[string](errors.New("temporary failure"))
-		}
-		return goresult.Ok(fmt.Sprintf("success on attempt %d", attempt))
-	}
-	// Configure backoff parameters.
-	cfg := goresult.BackoffConfig{
-		InitialDelay: 100 * time.Millisecond,
-		MaxDelay:     1 * time.Second,
-		Factor:       2,
-		Jitter:       0.1,
-	}
-	retryResult := goresult.RetryWithBackoff(5, retryFn, cfg)
-	if retryResult.IsOk() {
-		fmt.Println("Retry succeeded:", retryResult.Unwrap())
-	} else {
-		fmt.Println("Retry failed:", retryResult.UnwrapErr())
-	}
-
-	// === Example 5: Batch and AggregateErrors ===
-
-	fmt.Println("\n=== Example 5: Batch and AggregateErrors ===")
-	tasks := []goresult.Result[int]{
-		goresult.Ok(1),
-		goresult.Err[int](errors.New("error in task 2")),
-		goresult.Ok(3),
-		goresult.Err[int](errors.New("error in task 4")),
-	}
-	oks, errs := goresult.BatchResults(tasks)
-	fmt.Println("Batch Ok values:", oks)
-	fmt.Println("Batch Errors:", errs)
-	aggErr := goresult.AggregateErrors(errs)
-	fmt.Println("Aggregated Error:", aggErr)
-
-	// === Example 6: ParallelWithWorkers ===
-
-	fmt.Println("\n=== Example 6: ParallelWithWorkers ===")
-	// Define several functions that return a Result.
-	functions := []func() goresult.Result[int]{
-		func() goresult.Result[int] {
-			time.Sleep(100 * time.Millisecond)
-			return goresult.Ok(10)
-		},
-		func() goresult.Result[int] {
-			time.Sleep(50 * time.Millisecond)
-			return goresult.Err[int](errors.New("failed job"))
-		},
-		func() goresult.Result[int] {
-			time.Sleep(150 * time.Millisecond)
-			return goresult.Ok(30)
-		},
-	}
-	parallelResults := goresult.ParallelWithWorkers(functions, 2)
-	for i, res := range parallelResults {
-		if res.IsOk() {
-			fmt.Printf("Job %d succeeded: %d\n", i, res.Unwrap())
-		} else {
-			fmt.Printf("Job %d failed: %v\n", i, res.UnwrapErr())
-		}
-	}
-
-	// === Example 7: Optional Conversion ===
-
-	fmt.Println("\n=== Example 7: Optional Conversion ===")
-	opt := r1.ToOption()
-	if opt.Valid() {
-		fmt.Println("Option contains:", opt.Value())
-	} else {
-		fmt.Println("Option is invalid")
-	}
-	// Convert Option back to Result.
-	rFromOpt := goresult.FromOption(opt, errors.New("no value"))
-	fmt.Println("Converted back to Result:", rFromOpt.Unwrap())
-
-	// === Example 8: DebugString and Log ===
-
-	fmt.Println("\n=== Example 8: DebugString and Log ===")
-	fmt.Println("r1 debug string:", r1.DebugString())
-	fmt.Println("r2 debug string:", r2.DebugString())
-	r1.Log(logger)
-	r2.Log(logger)
-}
+        // -------------------------------------------------
+        // 8️⃣ Debugging & logging
+        // -------------------------------------------------
+        fmt.Println("r1 debug string:", r1.DebugString())
+        fmt.Println("r2 debug string:", r2.DebugString())
+        r1.Log(logger)
+        r2.Log(logger)
+    }
 ```
 
-## Configuration
+---
 
-Retry logic can be configured using the BackoffConfig struct:
+## Core Types & Functions
 
+| Type / Function | Purpose |
+|-----------------|---------|
+| `Result[T]` | Generic container holding either a value (`Ok`) or an error (`Err`). |
+| `Ok[T](v T)` | Construct a successful result. |
+| `Err[T](e error)` | Construct a failed result. |
+| `IsOk()`, `IsErr()` | Predicate checks. |
+| `Unwrap()`, `UnwrapOr(default)` | Retrieve the value (panics on `Err`). |
+| `UnwrapErr()` | Retrieve the stored error. |
+| `Or(other)`, `OrElse(fn)` | Provide an alternate result. |
+| `Filter(pred, err)` | Keep `Ok` only if predicate holds. |
+| `Map(fn)`, `MapErr(fn)` | Transform value or error. |
+| `AndThen(fn)` | Chain computations returning `Result`. |
+| `RetryWithBackoff(attempts, fn, cfg)` | Retry a function with exponential back‑off. |
+| `BatchResults([]Result[T])` | Split slice into successes & errors. |
+| `AggregateErrors([]error)` | Combine multiple errors into one. |
+| `ParallelWithWorkers([]func() Result[T], workers)` | Run functions concurrently with panic recovery. |
+| `ToOption()`, `FromOption(opt, fallback)` | Convert between `Result` and optional values. |
+| `DebugString()`, `Log(logger)` | Human‑readable representation & structured logging. |
+
+---
+
+## Advanced Usage
+
+### Retry with Backoff
 ```go
-cfg := goresult.BackoffConfig{
-	InitialDelay: 50 * time.Millisecond,
-	MaxDelay:     1 * time.Second,
-	Factor:       1.5,
-	Jitter:       0.1,
-}
+    cfg := goresult.BackoffConfig{
+        InitialDelay: 50 * time.Millisecond,
+        MaxDelay:     2 * time.Second,
+        Factor:       1.5,
+        Jitter:       0.2,
+    }
+    res := goresult.RetryWithBackoff(5, myFunc, cfg)
 ```
 
-This ensures controlled retries with exponential backoff and jitter to avoid overloading resources.
+* `InitialDelay` – base wait before first retry.  
+* `MaxDelay` – ceiling for exponential growth.  
+* `Factor` – multiplier applied each attempt.  
+* `Jitter` – random variation (0‑1) to avoid thundering herd.
 
-## Benefits
+### Batch Processing & Aggregated Errors
+```go
+    results := []goresult.Result[int]{ ... }
+    oks, errs := goresult.BatchResults(results)
+    if agg := goresult.AggregateErrors(errs); agg != nil {
+        fmt.Println("combined error:", agg)
+    }
+```
 
-- **Simplifies error handling** with `Result`-based flow.
-- **Improves debugging** with automatic stack traces and structured logging via `golog`.
-- **Enables concurrency** with built-in support for parallel execution using worker pools.
-- **Ensures extensibility** with a modular design that integrates easily into any Go project.
+### Parallel Execution with Worker Pools
+```go
+    jobs := []func() goresult.Result[string]{ ... }
+    out := goresult.ParallelWithWorkers(jobs, 4) // 4 concurrent workers
+```
+
+* Panics inside a job are recovered and turned into an `Err` containing `"panic: <msg>"`.
+
+### Optional Conversion
+```go
+    opt := goresult.Ok(10).ToOption()
+    res := goresult.FromOption(opt, errors.New("missing"))
+```
+
+### Debugging & Structured Logging
+```go
+    logger, _ := golog.NewLogger(golog.WithStdOutProvider("console"))
+    result.Log(logger) // logs value or error with stack trace
+```
+
+---
+
+## Configuration Details
+
+`BackoffConfig` fields:
+
+| Field          | Type                | Description |
+|----------------|---------------------|-------------|
+| `InitialDelay` | `time.Duration`     | Base delay before first retry. |
+| `MaxDelay`     | `time.Duration`     | Upper bound for delay growth. |
+| `Factor`       | `float64`           | Exponential multiplier. |
+| `Jitter`       | `float64` (0‑1)     | Random fraction of delay added/subtracted. |
+
+---
 
 ## Dependencies
 
-The package depends on:
-- `github.com/evdnx/golog`: For structured, high-performance logging with multiple providers.
+| Dependency | Purpose |
+|------------|---------|
+| `github.com/evdnx/golog` | Structured, high‑performance logging with multiple output providers. |
+| Standard library (`errors`, `sync/atomic`, `time`, …) | Core functionality. |
+
+---
 
 ## Contributing
 
-We welcome contributions! Feel free to fork the repository, create a feature branch, and submit a pull request.
+1. Fork the repository.  
+2. Create a feature branch (`git checkout -b feat/my-feature`).  
+3. Write tests covering your changes.  
+4. Run `go test ./...` – all tests must pass.  
+5. Open a Pull Request describing the change and its motivation.
+
+Please adhere to Go formatting (`gofmt -s`) and keep the public API stable whenever possible.
+
+---
 
 ## License
 
-This project is licensed under the MIT License.
+This project is released under the **MIT‑0** license (public domain equivalent). See the `LICENSE` file for details.
