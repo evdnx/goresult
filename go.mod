@@ -2,7 +2,7 @@ module github.com/evdnx/goresult
 
 go 1.25
 
-require github.com/evdnx/golog v1.0.4
+require github.com/evdnx/golog v1.0.5
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
